@@ -1,0 +1,96 @@
+app:
+  # Should be the same as backend.baseUrl when using the `app-backend` plugin.
+  baseUrl: http://backstage.172.32.4.127.nip.io
+
+backend:
+  # Note that the baseUrl should be the URL that the browser and other clients
+  # should use when communicating with the backend, i.e. it needs to be
+  # reachable not just from within the backend host, but from all of your
+  # callers. When its value is "http://localhost:7007", it's strictly private
+  # and can't be reached by others.
+  baseUrl: http://backstage.172.32.4.127.nip.io
+  # The listener can also be expressed as a single <host>:<port> string. In this case we bind to
+  # all interfaces, the most permissive setting. The right value depends on your specific deployment.
+  listen: ':7007'
+
+  # config options: https://node-postgres.com/apis/client
+  database:
+    client: pg
+    connection:
+      host: ${POSTGRES_HOST}
+      port: ${POSTGRES_PORT}
+      user: ${POSTGRES_USER}
+      password: ${POSTGRES_PASSWORD}
+      # https://node-postgres.com/features/ssl
+      # you can set the sslmode configuration option via the `PGSSLMODE` environment variable
+      # see https://www.postgresql.org/docs/current/libpq-ssl.html Table 33.1. SSL Mode Descriptions (e.g. require)
+      # ssl:
+      #   ca: # if you have a CA file and want to verify it you can uncomment this section
+      #     $file: <file-path>/ca/server.crt
+
+  # HTTPで運用する場合はupgrade-insecure-requestsを無効化
+  csp:
+    upgrade-insecure-requests: false
+
+# 認証設定
+auth:
+  environment: production
+  session:
+    secret: ${AUTH_SESSION_SECRET}
+  providers:
+    guest: {}
+    oidc:
+      production:
+        metadataUrl: ${AUTH_OIDC_METADATA_URL}
+        clientId: ${AUTH_OIDC_CLIENT_ID}
+        clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
+        prompt: auto
+        signIn:
+          resolvers:
+            - resolver: emailMatchingUserEntityProfileEmail
+
+catalog:
+  # Overrides the default list locations from app-config.yaml as these contain example data.
+  # See https://backstage.io/docs/features/software-catalog/#adding-components-to-the-catalog for more details
+  # on how to get entities into the catalog.
+  locations:
+    # Local example data, replace this with your production config, these are intended for demo use only.
+    # File locations are relative to the backend process, typically in a deployed context, such as in a Docker container, this will be the root
+    - type: file
+      target: ./examples/entities.yaml
+
+    # Local example template
+    - type: file
+      target: ./examples/template/template.yaml
+      rules:
+        - allow: [Template]
+
+    # Local example organizational data
+    - type: file
+      target: ./examples/org.yaml
+      rules:
+        - allow: [User, Group]
+
+    # 評価対象として、テンプレートを追加
+    - type: url
+      target: https://github.com/Hitachi/oss-assets/tree/main/article/thinkit-smallplatform/03-backstage-software-template/template/template.yaml
+      rules:
+        - allow: [Template]
+
+  # Keycloakのユーザーとユーザーグループを同期する設定
+  providers:
+    keycloakOrg:
+      default:
+        baseUrl: ${CATALOG_KEYCLOAK_BASE_URL}
+        loginRealm: ${CATALOG_KEYCLOAK_LOGIN_REALM}
+        realm: ${CATALOG_KEYCLOAK_REALM}
+        clientId: ${CATALOG_KEYCLOAK_CLIENT_ID}
+        clientSecret: ${CATALOG_KEYCLOAK_CLIENT_SECRET}
+        schedule:
+          frequency: { seconds: 30 } # テスト用に短く設定
+          timeout: { minutes: 3 }
+
+integrations:
+  github:
+    - host: github.com
+      token: ${GITHUB_TOKEN}
