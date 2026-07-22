@@ -1,0 +1,684 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: authzen-demo
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-admin
+  namespace: authzen-demo
+type: Opaque
+stringData:
+  username: admin
+  password: admin
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nginx-pep-client
+  namespace: authzen-demo
+type: Opaque
+stringData:
+  client_id: nginx-pep
+  client_secret: change-me
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: keycloak-data
+  namespace: authzen-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: authzen-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.7.0
+          args:
+            - start-dev
+            - --features=authzen
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin
+                  key: username
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin
+                  key: password
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HOSTNAME_STRICT_HTTPS
+              value: "false"
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: keycloak-data
+              mountPath: /opt/keycloak/data
+          readinessProbe:
+            httpGet:
+              path: /realms/master
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /realms/master
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+      volumes:
+        - name: keycloak-data
+          persistentVolumeClaim:
+            claimName: keycloak-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: authzen-demo
+spec:
+  type: NodePort
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-mcp-config
+  namespace: authzen-demo
+data:
+  nginx.conf: |
+    worker_processes 1;
+
+    error_log stderr info;
+
+    env PEP_CLIENT_ID;
+    env PEP_CLIENT_SECRET;
+
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      lua_shared_dict token_cache 10m;
+
+      resolver kube-dns.kube-system.svc.cluster.local valid=10s;
+
+      server {
+        listen 8080;
+
+        location = /healthz {
+          default_type application/json;
+          return 200 '{"status":"ok"}';
+        }
+
+        location = /.well-known/oauth-protected-resource {
+
+          if ($request_method = OPTIONS) {
+            add_header Access-Control-Allow-Origin *;
+            add_header Access-Control-Allow-Methods "GET, OPTIONS";
+            add_header Access-Control-Allow-Headers "*";
+            return 204;
+          }
+
+          default_type application/json;
+
+          add_header Access-Control-Allow-Origin * always;
+          add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
+          add_header Access-Control-Allow-Headers "*" always;
+
+          return 200 '{
+            "resource":"http://ip-172-30-2-221.ap-northeast-1.compute.internal:8081/mcp",
+            "authorization_servers":[
+              "http://ip-172-30-2-221.ap-northeast-1.compute.internal:8080/realms/authzen-demo"
+            ]
+          }';
+        }
+
+        location = /_keycloak_token {
+          internal;
+          proxy_method POST;
+          proxy_pass http://keycloak.authzen-demo.svc.cluster.local:8080/realms/authzen-demo/protocol/openid-connect/token;
+          proxy_set_header Content-Type application/x-www-form-urlencoded;
+        }
+
+        location = /_authzen_evaluation {
+          internal;
+          proxy_method POST;
+          proxy_pass http://keycloak.authzen-demo.svc.cluster.local:8080/realms/authzen-demo/authzen/access/v1/evaluation;
+          proxy_set_header Content-Type application/json;
+        }
+
+        location = /mcp {
+          content_by_lua_block {
+            local cjson = require "cjson.safe"
+
+            if ngx.req.get_method() == "OPTIONS" then
+              ngx.header["Access-Control-Allow-Origin"] = "*"
+              ngx.header["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+              ngx.header["Access-Control-Allow-Headers"] =
+                "Authorization, Content-Type, Mcp-Protocol-Version"
+
+              ngx.status = 204
+              return ngx.exit(204)
+            end
+
+            local function json_response(status, obj)
+              ngx.status = status
+
+              ngx.header["Content-Type"] = "application/json"
+
+              ngx.header["Access-Control-Allow-Origin"] = "*"
+              ngx.header["Access-Control-Allow-Methods"] =
+                "GET, POST, OPTIONS"
+              ngx.header["Access-Control-Allow-Headers"] =
+                "Authorization, Content-Type, Mcp-Protocol-Version"
+
+              ngx.say(cjson.encode(obj))
+              return ngx.exit(status)
+            end
+
+            local function base64url_decode(input)
+              input = input:gsub("-", "+")
+              input = input:gsub("_", "/")
+
+              local pad = #input % 4
+              if pad == 2 then
+                input = input .. "=="
+              elseif pad == 3 then
+                input = input .. "="
+              elseif pad == 1 then
+                return nil
+              end
+
+              return ngx.decode_base64(input)
+            end
+
+            local function get_pep_token()
+              local token = ngx.shared.token_cache:get("pep_access_token")
+              if token then
+                return token
+              end
+
+              local client_id = os.getenv("PEP_CLIENT_ID") or "nginx-pep"
+              local client_secret = os.getenv("PEP_CLIENT_SECRET") or "change-me"
+
+              local body =
+                "grant_type=client_credentials" ..
+                "&client_id=" .. ngx.escape_uri(client_id) ..
+                "&client_secret=" .. ngx.escape_uri(client_secret)
+
+              ngx.req.set_header("Content-Type", "application/x-www-form-urlencoded")
+
+              local res = ngx.location.capture("/_keycloak_token", {
+                method = ngx.HTTP_POST,
+                body = body
+              })
+
+              if not res or res.status ~= 200 then
+                ngx.log(ngx.ERR, "failed to get PEP token: ", res and res.status or "nil", " body=", res and res.body or "nil")
+                return nil
+              end
+
+              local parsed = cjson.decode(res.body)
+              if not parsed or not parsed.access_token then
+                ngx.log(ngx.ERR, "token response does not contain access_token: ", res.body)
+                return nil
+              end
+
+              local ttl = parsed.expires_in or 60
+              ngx.shared.token_cache:set("pep_access_token", parsed.access_token, math.max(ttl - 10, 10))
+
+              return parsed.access_token
+            end
+
+            local function get_subject_from_access_token()
+              local auth_header = ngx.req.get_headers()["Authorization"]
+
+              if not auth_header then
+                return nil, "missing_authorization_header"
+              end
+
+              local access_token =
+                auth_header:match("^Bearer%s+(.+)$")
+
+              if not access_token then
+                return nil, "invalid_authorization_header"
+              end
+
+              local token_parts = {}
+
+              for part in string.gmatch(access_token, "[^%.]+") do
+                table.insert(token_parts, part)
+              end
+
+              if #token_parts ~= 3 then
+                return nil, "invalid_jwt_format"
+              end
+
+              local payload_json =
+                base64url_decode(token_parts[2])
+
+              if not payload_json then
+                return nil, "invalid_jwt_payload"
+              end
+
+              local claims =
+                cjson.decode(payload_json)
+
+              if not claims then
+                return nil, "invalid_jwt_payload_json"
+              end
+
+              local preferred_username =
+                claims.preferred_username
+
+              if not preferred_username then
+                return nil, "preferred_username_not_found"
+              end
+
+              ngx.log(
+                ngx.INFO,
+                "preferred_username=",
+                preferred_username
+              )
+
+              return {
+                username = preferred_username,
+                client_id = claims.client_id or claims.azp or "unknown-agent",
+                access_token = access_token
+              }, nil
+
+            end
+
+            local function call_authzen(
+              subject_id,
+              agent_id,
+              tool_name,
+              arguments
+            )
+              local pep_token = get_pep_token()
+              if not pep_token then
+                return nil, "failed_to_get_pep_token"
+              end
+
+              local evaluation_request = {
+                subject = {
+                  type = "user",
+                  id = subject_id
+                },
+                action = {
+                  name = "tools/call"
+                },
+                resource = {
+                  type = "tool",
+                  id = tool_name
+                },
+                context = {
+                  agent = agent_id,
+                  customerId = arguments.customerId
+                }
+              }
+
+              ngx.req.set_header("Authorization", "Bearer " .. pep_token)
+              ngx.req.set_header("Content-Type", "application/json")
+
+              local res = ngx.location.capture("/_authzen_evaluation", {
+                method = ngx.HTTP_POST,
+                body = cjson.encode(evaluation_request)
+              })
+
+              if not res then
+                return nil, "authzen_no_response"
+              end
+
+              ngx.log(
+                ngx.INFO,
+                "AuthZEN request: ",
+                cjson.encode(evaluation_request)
+              )
+
+              ngx.log(
+                ngx.INFO,
+                "Authenticated subject=",
+                subject_id
+              )
+
+              ngx.log(ngx.INFO, "AuthZEN response status: ", res.status, " body: ", res.body)
+
+              if res.status ~= 200 then
+                return nil, "authzen_http_" .. tostring(res.status)
+              end
+
+              local decision = cjson.decode(res.body)
+              if not decision then
+                return nil, "authzen_invalid_json"
+              end
+
+              return decision.decision == true, nil
+            end
+
+            ngx.req.read_body()
+            local body = ngx.req.get_body_data()
+            if not body or body == "" then
+              return json_response(400, {
+                error = "empty request body"
+              })
+            end
+
+            local req = cjson.decode(body)
+            if not req then
+              return json_response(400, {
+                error = "invalid json"
+              })
+            end
+
+            ngx.log(
+              ngx.INFO,
+              "Authorization=",
+              tostring(ngx.req.get_headers()["Authorization"])
+            )
+
+            ngx.log(
+              ngx.INFO,
+              "MCP request=",
+              cjson.encode(req)
+            )
+
+            local method = req.method
+            local id = req.id
+
+            if method == "initialize" then
+              return json_response(200, {
+                jsonrpc = "2.0",
+                id = id,
+                result = {
+                  protocolVersion = "2025-06-18",
+                  serverInfo = {
+                    name = "nginx-authzen-mcp-demo",
+                    version = "0.1.0"
+                  },
+                  capabilities = {
+                    tools = {
+                      listChanged = false
+                    }
+                  }
+                }
+              })
+            end
+
+            if method == "notifications/initialized" then
+              return json_response(200, {})
+            end
+
+            if method == "tools/list" then
+              return json_response(200, {
+                jsonrpc = "2.0",
+                id = id,
+                result = {
+                  tools = {
+                    {
+                      name = "search_customer",
+                      description = "Search customer information with AuthZEN authorization",
+                      inputSchema = {
+                        type = "object",
+                        properties = {
+                          customerId = {
+                            type = "string",
+                            description = "Customer ID"
+                          }
+                        },
+                        required = {
+                          "customerId"
+                        }
+                      }
+                    }
+                  }
+                }
+              })
+            end
+
+            if method == "tools/call" then
+              local params = req.params or {}
+              local tool_name = params.name
+              local arguments = params.arguments or {}
+
+              if tool_name ~= "search_customer" then
+                return json_response(404, {
+                  jsonrpc = "2.0",
+                  id = id,
+                  error = {
+                    code = -32601,
+                    message = "unknown tool"
+                  }
+                })
+              end
+
+              local user_info,
+                    subject_err =
+                    get_subject_from_access_token()
+
+              if subject_err or not user_info then
+                ngx.log(
+                  ngx.INFO,
+                  "subject_err=",
+                  tostring(subject_err),
+                  " user_info=",
+                  cjson.encode(user_info)
+                )
+                return json_response(401, {
+                  jsonrpc = "2.0",
+                  id = id,
+                  error = {
+                    code = -32002,
+                    message = subject_err
+                  }
+                })
+              end
+
+              local allowed, err =
+                call_authzen(
+                  user_info.username,
+                  user_info.client_id,
+                  tool_name,
+                  arguments
+                )
+              if err then
+                return json_response(500, {
+                  jsonrpc = "2.0",
+                  id = id,
+                  error = {
+                    code = -32000,
+                    message = err
+                  }
+                })
+              end
+
+              if not allowed then
+                return json_response(403, {
+                  jsonrpc = "2.0",
+                  id = id,
+                  error = {
+                    code = -32001,
+                    message = "forbidden by AuthZEN PDP"
+                  }
+                })
+              end
+
+              local customer_id = arguments.customerId or "unknown"
+
+              return json_response(200, {
+                jsonrpc = "2.0",
+                id = id,
+                result = {
+                  content = {
+                    {
+                      type = "text",
+                      text = "customerId=" .. customer_id .. ", customerName=ACME Corp"
+                    }
+                  }
+                }
+              })
+            end
+
+            return json_response(404, {
+              jsonrpc = "2.0",
+              id = id,
+              error = {
+                code = -32601,
+                message = "method not found"
+              }
+            })
+          }
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-mcp
+  namespace: authzen-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-mcp
+  template:
+    metadata:
+      labels:
+        app: nginx-mcp
+    spec:
+      containers:
+        - name: nginx-mcp
+          image: openresty/openresty:1.25.3.1-0-alpine
+          env:
+            - name: PEP_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: nginx-pep-client
+                  key: client_id
+            - name: PEP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: nginx-pep-client
+                  key: client_secret
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /usr/local/openresty/nginx/conf/nginx.conf
+              subPath: nginx.conf
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-mcp-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-mcp
+  namespace: authzen-demo
+spec:
+  type: NodePort
+  selector:
+    app: nginx-mcp
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-inspector
+  namespace: authzen-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-inspector
+  template:
+    metadata:
+      labels:
+        app: mcp-inspector
+    spec:
+      containers:
+        - name: mcp-inspector
+          image: node:22-alpine
+          command:
+            - sh
+            - -c
+            - |
+              npx -y @modelcontextprotocol/inspector
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: CLIENT_PORT
+              value: "5173"
+            - name: SERVER_PORT
+              value: "3000"
+            - name: ALLOWED_ORIGINS
+              value: "*"
+          ports:
+            - name: ui
+              containerPort: 5173
+            - name: proxy
+              containerPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-inspector
+  namespace: authzen-demo
+spec:
+  type: NodePort
+  selector:
+    app: mcp-inspector
+  ports:
+    - name: ui
+      port: 5173
+      targetPort: 5173
+      nodePort: 30173
+    - name: proxy
+      port: 3000
+      targetPort: 3000
+      nodePort: 30300
