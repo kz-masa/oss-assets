@@ -1,0 +1,49 @@
+binds:
+- port: 3000
+  listeners:
+  - routes:
+    - backends:
+      - mcp:
+          statefulMode: stateless
+          targets:
+          - name: user
+            openapi:
+              host: localhost:8000
+              schema:
+                file: ./openapi_user.json
+          - name: pet
+            openapi:
+              host: localhost:8001
+              schema:
+                file: ./openapi_pet.json
+      policies:
+        cors:
+          allowOrigins:
+          - '*'
+          allowHeaders:
+          - '*'
+        mcpAuthentication:
+          issuer: http://localhost:8080/realms/sample
+          jwks: {url: 'http://localhost:8080/realms/sample/protocol/openid-connect/certs'}
+          audiences:
+          - petshop
+          provider:
+            keycloak: {}
+          resourceMetadata:
+            scopesSupported:
+            - profile
+            - openid
+            - read_user
+            - create_user
+            - read_pet
+            - create_pet
+            authorizationServers:
+            - http://localhost:8080/realms/sample
+            bearerMethodsSupported:
+            - header
+        mcpAuthorization:
+          rules:
+          - 'mcp.tool.name == "create_user" && jwt.scope.contains("create_user")'
+          - 'mcp.tool.name == "get_user" && jwt.scope.contains("read_user")'
+          - 'mcp.tool.name == "create_pet" && jwt.scope.contains("create_pet")'
+          - 'mcp.tool.name == "get_pet" && jwt.scope.contains("read_pet")'
