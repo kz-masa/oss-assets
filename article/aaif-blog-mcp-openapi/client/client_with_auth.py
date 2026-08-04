@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import hashlib
-import logging
 import secrets
 import sys
 import urllib.parse
@@ -9,12 +8,11 @@ import webbrowser
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 import httpx
-from mcp import ClientSession
-from mcp.client.sse import sse_client
 from fastmcp import Client
 from fastmcp.client.auth import BearerAuth
 import uvicorn
 from urllib.parse import urlparse, urlunparse
+from mcp.shared.exceptions import MCPError
 
 MCP_SERVER_URL = "http://localhost:3000/mcp"
 CLIENT_ID_URL = "http://localhost:8081/oauth/metadata.json"
@@ -85,17 +83,17 @@ async def discover_oauth_endpoints():
         # 1. request without access token
         print(f"MCP Server URL: {MCP_SERVER_URL}")
         resp = await client.get(MCP_SERVER_URL)
-        
+
         if resp.status_code != 401:
             raise RuntimeError(f"Expected 401 Unauthorized, but got {resp.status_code}")
-        
+
         # 2. get resource_metadata url
         www_auth = resp.headers.get("WWW-Authenticate", "")
         print(f"Received WWW-Authenticate: {www_auth}")
 
         if 'resource_metadata="' not in www_auth:
             raise RuntimeError("resource_metadata not found in WWW-Authenticate header")
-        
+
         metadata_url = www_auth.split('resource_metadata="')[1].split('"')[0]
 
         # 3. request MCP resource server metadata
@@ -103,14 +101,14 @@ async def discover_oauth_endpoints():
         meta_resp = await client.get(metadata_url)
         meta_resp.raise_for_status()
         resource_metadata = meta_resp.json()
-        
+
         auth_servers = resource_metadata.get("authorization_servers", [])
         if not auth_servers:
             raise RuntimeError("No authorization servers listed in resource metadata")
-        
+
         issuer_url = auth_servers[0]
         print(f"Discovered Authorization Server Issuer: {issuer_url}")
-        
+
         # 4. request MCP authorization server metadata
         print("\n=== FLOW (3): authorization server metadata ===")
         well_known_url = create_well_known_url(issuer_url)
@@ -118,13 +116,14 @@ async def discover_oauth_endpoints():
         oidc_resp = await client.get(well_known_url)
         oidc_resp.raise_for_status()
         oidc_config = oidc_resp.json()
-        
+
         # 5. get MCP authorization server endpoints
         discovered_endpoints["auth_endpoint"] = oidc_config.get("authorization_endpoint")
         discovered_endpoints["token_endpoint"] = oidc_config.get("token_endpoint")
-        
+
         print(f"Authorization Endpoint: {discovered_endpoints['auth_endpoint']}")
         print(f"Token Endpoint:         {discovered_endpoints['token_endpoint']}")
+
 
 def create_well_known_url(issuer: str) -> str:
     parsed = urlparse(issuer)
@@ -136,11 +135,13 @@ def create_well_known_url(issuer: str) -> str:
     updated_parsed = parsed._replace(path=new_path)
     return urlunparse(updated_parsed)
 
+
 def generate_pkce_pair() -> tuple[str, str]:
     verifier = secrets.token_urlsafe(64)
     sha256_hash = hashlib.sha256(verifier.encode('utf-8')).digest()
     challenge = base64.urlsafe_b64encode(sha256_hash).decode('utf-8').rstrip('=') 
     return verifier, challenge
+
 
 async def get_token_via_cimd(custom_scope: str) -> str:
     global pkce_verifier
@@ -195,8 +196,9 @@ async def get_token_via_cimd(custom_scope: str) -> str:
         await asyncio.sleep(0.5)
         return access_token
 
+
 async def call_mcp(token: str, tool_name: str):
-    print("\n=== FLOW (12)-(15): MCP request with access token ===")
+    print("\n=== FLOW (12)-(14): MCP request with access token ===")
 
     client = Client(
         MCP_SERVER_URL,
@@ -212,13 +214,6 @@ async def call_mcp(token: str, tool_name: str):
             for tool in result_obj:
                 print(f"- {tool.name}: {tool.description}")
                 available_tool_names.add(tool.name)
-
-            if tool_name not in available_tool_names:
-                print("\n==============================================")
-                print(f"Requested tool '{tool_name}' is not available.")
-                print("Execution stopped to prevent unauthorized call_tool.")
-                print("==============================================")
-                return
 
             print(f"\nRun tool: [{tool_name}] ...")
             match tool_name:
@@ -242,12 +237,12 @@ async def call_mcp(token: str, tool_name: str):
                 if content.type == "text":
                     print(content.text)
             print("================================")
-    except httpx.HTTPStatusError as e:
+    except MCPError as e:
         print("\n===============================")
-        print("===    HTTP STATUS ERROR    ===")
+        print("===        MCP ERROR        ===")
         print("===============================")
-        print(f"Status Code: {e.response.status_code}")
-        print(f"Error Body : {e.response.text}")
+        print(f"JSON-RPC Error Code: {getattr(e, 'code', 'N/A')}")
+        print(f"JSON-RPC Error Message: {getattr(e, 'message', 'N/A')}")
         print("===============================")
         return
     except Exception as e:
@@ -260,6 +255,7 @@ async def call_mcp(token: str, tool_name: str):
             print("===============================")
             return
         raise e
+
 
 def parse_arguments() -> tuple[str, str] | None:
     DEFAULT_TOOL = "user_create_user"
@@ -287,6 +283,7 @@ def parse_arguments() -> tuple[str, str] | None:
             print("Example: python filename.py pet_create_pet create\n")
             return None
 
+
 async def main():
     parsed_args = parse_arguments()
     if parsed_args is None:
@@ -302,5 +299,7 @@ async def main():
     except Exception as e:
         print(f"\n[FATAL ERROR] System execution failed: {e}")
 
+
 if __name__ == "__main__":
     asyncio.run(main())
+
