@@ -1,8 +1,8 @@
 package api
 
 import (
-	"net/http"
 	"log/slog"
+	"net/http"
 
 	"github.com/labstack/echo/v4"
 )
