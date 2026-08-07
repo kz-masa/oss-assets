@@ -1,9 +1,9 @@
 apiVersion: scaffolder.backstage.io/v1beta3
 kind: Template
 metadata:
-  name: go-echo-template
-  title: Go echo template
-  description: GoのechoによるREST APIテンプレート
+  name: go-echo-template-observability
+  title: Go echo template with observability
+  description: GoのechoによるREST APIテンプレート(Observability実装済み)
 spec:
   owner: guests
   type: service
