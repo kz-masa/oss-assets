@@ -29,7 +29,7 @@ func main() {
 	// Middleware
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
-	e.Use(otelecho.Middleware("go-echo-template"))
+	e.Use(otelecho.Middleware("${{values.k8sResource.name}}"))
 
 	// Create API server instance
 	server := api.NewServer()

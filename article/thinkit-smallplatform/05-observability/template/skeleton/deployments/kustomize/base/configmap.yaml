@@ -8,5 +8,5 @@ data:
   PORT: "8080"
   LOG_LEVEL: "info"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc:4317"
-  OTEL_SERVICE_NAME: "${{values.name}}"
-  OTEL_RESOURCE_ATTRIBUTES: "service.namespace=${{values.k8sResource.namespace}},deployment.environment=production"
+  OTEL_SERVICE_NAME: "${{values.k8sResource.name}}"
+  OTEL_RESOURCE_ATTRIBUTES: "service.namespace=${{values.k8sResource.namespace}},deployment.environment=development"

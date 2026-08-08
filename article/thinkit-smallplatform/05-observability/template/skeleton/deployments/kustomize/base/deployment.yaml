@@ -14,6 +14,8 @@ spec:
       labels:
         app: app
     spec:
+      imagePullSecrets:
+        - name: regcred
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname

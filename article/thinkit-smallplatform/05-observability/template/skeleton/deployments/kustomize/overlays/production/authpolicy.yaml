@@ -12,7 +12,7 @@ spec:
       authentication:
         "keycloak-introspection":
           oauth2Introspection:
-            endpoint: http://keycloak.172.32.4.127.nip.io/realms/${{values.keycloakRealm}}/protocol/openid-connect/token/introspect
+            endpoint: http://keycloak.10.50.1.5.nip.io/realms/${{values.keycloakRealm}}/protocol/openid-connect/token/introspect
             credentialsRef:
               name: keycloak-${{values.k8sResource.name}}-token-introspection-client-secret
       response:
